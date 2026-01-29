@@ -2,95 +2,123 @@ import { useState, useCallback } from "react";
 import { useDropzone } from "react-dropzone";
 import { Button } from "@/app/components/ui/button";
 import { Card, CardContent } from "@/app/components/ui/card";
-import { Upload, Image, CheckCircle, X } from "lucide-react";
+import { Upload, FileText, CheckCircle, X } from "lucide-react";
+import * as pdfjsLib from "pdfjs-dist";
+
+// Set up PDF.js worker - use local file
+pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs';
+console.log("📄 PDF.js worker configured:", pdfjsLib.GlobalWorkerOptions.workerSrc);
 
 interface UploadTemplatePageProps {
-  onNext: (images: string[]) => void;
+  onNext: (pdfs: string[]) => void;
   onBack: () => void;
 }
 
+interface PdfPreview {
+  dataUrl: string;
+  thumbnail: string;
+}
+
 export function UploadTemplatePage({ onNext, onBack }: UploadTemplatePageProps) {
-  const [images, setImages] = useState<string[]>([]);
+  const [pdfs, setPdfs] = useState<PdfPreview[]>([]);
   const [isUploaded, setIsUploaded] = useState(false);
-  const [draggedIndex, setDraggedIndex] = useState<number | null>(null);
-  const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
+
+  const generatePdfThumbnail = async (pdfDataUrl: string): Promise<string> => {
+    try {
+      console.log("🔵 Generating PDF thumbnail...");
+      const base64Index = pdfDataUrl.indexOf(",");
+      if (base64Index === -1) {
+        console.error("❌ Invalid data URL format");
+        return "";
+      }
+      
+      const base64String = pdfDataUrl.substring(base64Index + 1);
+      console.log("🔵 Base64 extracted, length:", base64String.length);
+      
+      const pdfData = atob(base64String);
+      const pdfArray = new Uint8Array(pdfData.length);
+      for (let i = 0; i < pdfData.length; i++) {
+        pdfArray[i] = pdfData.charCodeAt(i);
+      }
+      console.log("🔵 PDF decoded, byte array size:", pdfArray.length);
+
+      console.log("🔵 Loading PDF document for thumbnail...");
+      const pdf = await pdfjsLib.getDocument({ data: pdfArray }).promise;
+      console.log("✅ PDF loaded, pages:", pdf.numPages);
+      
+      const page = await pdf.getPage(1);
+      
+      const viewport = page.getViewport({ scale: 4 });
+      const canvas = document.createElement("canvas");
+      canvas.width = viewport.width;
+      canvas.height = viewport.height;
+      
+      const context = canvas.getContext("2d");
+      if (!context) throw new Error("Could not get canvas context");
+      
+      await page.render({
+        canvasContext: context,
+        viewport: viewport,
+        canvas: canvas,
+      } as any).promise;
+      
+      const thumbnailUrl = canvas.toDataURL("image/png");
+      console.log("✅ Thumbnail generated, size:", thumbnailUrl.length);
+      return thumbnailUrl;
+    } catch (error) {
+      console.error("❌ Error generating PDF thumbnail:", error);
+      return "";
+    }
+  };
 
   const onDrop = useCallback(async (acceptedFiles: File[]) => {
-    const imagePromises = acceptedFiles.map((file) => {
-      return new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(reader.result as string);
-        reader.onerror = reject;
-        reader.readAsDataURL(file);
-      });
-    });
-
     try {
-      const imageDataUrls = await Promise.all(imagePromises);
-      setImages(imageDataUrls);
+      const pdfPromises = acceptedFiles.map(async (file) => {
+        return new Promise<PdfPreview>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = async () => {
+            try {
+              const dataUrl = reader.result as string;
+              const thumbnail = await generatePdfThumbnail(dataUrl);
+              resolve({ dataUrl, thumbnail });
+            } catch (error) {
+              reject(error);
+            }
+          };
+          reader.onerror = reject;
+          reader.readAsDataURL(file);
+        });
+      });
+
+      const pdfPreviews = await Promise.all(pdfPromises);
+      setPdfs(pdfPreviews);
       setIsUploaded(true);
     } catch (error) {
-      console.error("Error processing images:", error);
-      alert("Error processing image files. Please try again.");
+      console.error("Error processing PDFs:", error);
+      alert("Error processing PDF files. Please try again.");
     }
   }, []);
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
     accept: {
-      "image/jpeg": [".jpg", ".jpeg"],
-      "image/png": [".png"],
-      "image/svg+xml": [".svg"],
-      "image/webp": [".webp"],
+      "application/pdf": [".pdf"],
     },
     maxFiles: 10,
   });
 
   const handleNext = () => {
-    if (images.length > 0) {
-      onNext(images);
+    if (pdfs.length > 0) {
+      onNext(pdfs.map(p => p.dataUrl));
     }
   };
 
-  const removeImage = (index: number) => {
-    const newImages = images.filter((_, i) => i !== index);
-    setImages(newImages);
-    if (newImages.length === 0) {
+  const removePdf = (index: number) => {
+    const newPdfs = pdfs.filter((_, i) => i !== index);
+    setPdfs(newPdfs);
+    if (newPdfs.length === 0) {
       setIsUploaded(false);
     }
-  };
-
-  const handleDragStart = (index: number) => {
-    setDraggedIndex(index);
-  };
-
-  const handleDragOver = (index: number, e: React.DragEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    setDragOverIndex(index);
-  };
-
-  const handleDragLeave = () => {
-    setDragOverIndex(null);
-  };
-
-  const handleDrop = (index: number) => {
-    if (draggedIndex === null || draggedIndex === index) {
-      setDraggedIndex(null);
-      setDragOverIndex(null);
-      return;
-    }
-
-    const newImages = [...images];
-    const draggedImage = newImages[draggedIndex];
-    
-    // Remove from original position
-    newImages.splice(draggedIndex, 1);
-    // Insert at new position
-    newImages.splice(index, 0, draggedImage);
-    
-    setImages(newImages);
-    setDraggedIndex(null);
-    setDragOverIndex(null);
   };
 
   return (
@@ -102,7 +130,7 @@ export function UploadTemplatePage({ onNext, onBack }: UploadTemplatePageProps) 
           </Button>
         </div>
 
-        <h1 className="text-3xl mb-8">Upload Wedding Card Images</h1>
+        <h1 className="text-3xl mb-8">Upload Wedding Card PDF Template</h1>
 
         <Card className="mb-6">
           <CardContent className="p-8">
@@ -122,19 +150,19 @@ export function UploadTemplatePage({ onNext, onBack }: UploadTemplatePageProps) 
                   <>
                     <CheckCircle className="h-16 w-16 text-green-600" />
                     <div>
-                      <p className="text-lg mb-1">✔ Images uploaded successfully</p>
-                      <p className="text-sm text-gray-600">{images.length} images uploaded</p>
+                      <p className="text-lg mb-1">✔ PDFs uploaded successfully</p>
+                      <p className="text-sm text-gray-600">{pdfs.length} PDF(s) uploaded</p>
                       <Button
                         variant="outline"
                         size="sm"
                         className="mt-3"
                         onClick={(e) => {
                           e.stopPropagation();
-                          setImages([]);
+                          setPdfs([]);
                           setIsUploaded(false);
                         }}
                       >
-                        Change Images
+                        Change PDFs
                       </Button>
                     </div>
                   </>
@@ -143,7 +171,7 @@ export function UploadTemplatePage({ onNext, onBack }: UploadTemplatePageProps) 
                     <Upload className="h-16 w-16 text-gray-400" />
                     <div>
                       <p className="text-lg mb-1">
-                        {isDragActive ? "Drop the images here" : "Drag & drop image files here"}
+                        {isDragActive ? "Drop the PDF here" : "Drag & drop PDF file here"}
                       </p>
                       <p className="text-sm text-gray-500">or click to browse</p>
                     </div>
@@ -153,48 +181,42 @@ export function UploadTemplatePage({ onNext, onBack }: UploadTemplatePageProps) 
             </div>
             <div className="mt-4 space-y-2">
               <p className="text-sm text-gray-600 text-center">
-                ✓ Supported formats: JPG, PNG, SVG, WEBP (max 10 images)
+                ✓ Supported format: PDF (max 10 files)
               </p>
               <p className="text-sm text-gray-600 text-center">
-                ✓ Upload your wedding card images
+                ✓ Upload your wedding card PDF template
               </p>
             </div>
           </CardContent>
         </Card>
 
-        {isUploaded && images.length > 0 && (
+        {isUploaded && pdfs.length > 0 && (
           <Card className="mb-6">
             <CardContent className="p-6">
-              <h3 className="text-lg mb-4">Image Previews (Drag to reorder)</h3>
-              <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
-                {images.map((image, index) => (
-                  <div
-                    key={index}
-                    className={`relative group cursor-move transition-all ${
-                      draggedIndex === index ? "opacity-50" : ""
-                    } ${
-                      dragOverIndex === index ? "ring-2 ring-blue-500 scale-105" : ""
-                    }`}
-                    draggable
-                    onDragStart={() => handleDragStart(index)}
-                    onDragOver={(e) => handleDragOver(index, e)}
-                    onDragLeave={handleDragLeave}
-                    onDrop={() => handleDrop(index)}
-                  >
-                    <img
-                      src={image}
-                      alt={`Image ${index + 1}`}
-                      className="w-full h-32 object-cover rounded-lg border"
-                    />
+              <h3 className="text-lg mb-4">PDF Previews</h3>
+              <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+                {pdfs.map((pdf, index) => (
+                  <div key={index} className="relative group">
+                    {pdf.thumbnail ? (
+                      <img
+                        src={pdf.thumbnail}
+                        alt={`PDF ${index + 1} preview`}
+                        className="w-full h-48 object-cover rounded-lg border border-gray-200 bg-gray-100"
+                      />
+                    ) : (
+                      <div className="w-full h-48 rounded-lg border border-gray-200 bg-gray-100 flex items-center justify-center">
+                        <FileText className="h-12 w-12 text-gray-400" />
+                      </div>
+                    )}
                     <Button
                       variant="destructive"
                       size="sm"
                       className="absolute top-1 right-1 opacity-0 group-hover:opacity-100 transition-opacity"
-                      onClick={() => removeImage(index)}
+                      onClick={() => removePdf(index)}
                     >
                       <X className="h-4 w-4" />
                     </Button>
-                    <p className="text-xs text-center mt-1">Image {index + 1}</p>
+                    <p className="text-xs text-center mt-1 text-gray-600">PDF {index + 1}</p>
                   </div>
                 ))}
               </div>
@@ -203,8 +225,8 @@ export function UploadTemplatePage({ onNext, onBack }: UploadTemplatePageProps) 
         )}
 
         <div className="flex justify-end">
-          <Button size="lg" onClick={handleNext} disabled={!isUploaded || images.length === 0}>
-            Next - Place Names on Images
+          <Button size="lg" onClick={handleNext} disabled={!isUploaded || pdfs.length === 0}>
+            Next - Place Names on PDF
           </Button>
         </div>
       </div>

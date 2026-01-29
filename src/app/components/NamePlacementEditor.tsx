@@ -7,9 +7,15 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Input } from "@/app/components/ui/input";
 import { Lock, Move, ChevronLeft, ChevronRight } from "lucide-react";
 import { Tabs, TabsList, TabsTrigger } from "@/app/components/ui/tabs";
+import { PDFDocument } from "pdf-lib";
+import * as pdfjsLib from "pdfjs-dist";
+
+// Set up PDF.js worker - use local file
+pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs';
+console.log("📄 PDF.js worker configured:", pdfjsLib.GlobalWorkerOptions.workerSrc);
 
 interface NamePlacementEditorProps {
-  images: string[];
+  pdfs: string[];
   names: string[];
   onNext: (configs: ImageConfig[]) => void;
   onBack: () => void;
@@ -39,32 +45,196 @@ export interface ImageConfig {
   extraY?: number;
 }
 
-export function NamePlacementEditor({ images, names, onNext, onBack }: NamePlacementEditorProps) {
+export function NamePlacementEditor({ pdfs, names, onNext, onBack }: NamePlacementEditorProps) {
   const [currentImageIndex, setCurrentImageIndex] = useState(0);
-  const [displayOrder, setDisplayOrder] = useState<number[]>(() => images.map((_, idx) => idx));
-  const [imageConfigs, setImageConfigs] = useState<ImageConfig[]>(
-    images.map((_, index) => ({
-      imageIndex: index,
-      x: 50,
-      y: 35,
-      fontSize: 24,
-      designHeight: 850,
-      renderHeight: 850,
-      renderWidth: 850,
-      fontFamily: "Noto Sans Gujarati",
-      fontColor: "#000000",
-      bold: false,
-      italic: false,
-      underline: false,
-      locked: false,
-      enabled: false,
-      sampleText: names[0] || "Sample Name",
-      order: index,
-      extraText: undefined,
-      extraX: 50,
-      extraY: 60,
-    }))
-  );
+  const [displayOrder, setDisplayOrder] = useState<number[]>([]);
+  const [pdfImages, setPdfImages] = useState<string[]>([]); // Store rendered PDF pages as images
+  const [isLoadingPdfs, setIsLoadingPdfs] = useState(true); // Add loading state
+  const [renderErrors, setRenderErrors] = useState<string[]>([]); // Track rendering errors
+  const [imageConfigs, setImageConfigs] = useState<ImageConfig[]>([]);
+
+  // Render PDFs to images on mount
+  useEffect(() => {
+    const renderPdfPages = async () => {
+      try {
+        console.log("🔵 Starting PDF rendering...", "PDFs count:", pdfs.length);
+        if (!pdfs || pdfs.length === 0) {
+          console.log("❌ No PDFs provided");
+          setIsLoadingPdfs(false);
+          return;
+        }
+        
+        setIsLoadingPdfs(true);
+        const renderedImages: string[] = [];
+        const errors: string[] = [];
+        
+        for (let pdfIndex = 0; pdfIndex < pdfs.length; pdfIndex++) {
+          const pdfDataUrl = pdfs[pdfIndex];
+          try {
+            console.log(`🔵 Processing PDF ${pdfIndex + 1}/${pdfs.length}...`);
+            
+            if (!pdfDataUrl) {
+              console.error(`❌ PDF ${pdfIndex + 1} data URL is empty`);
+              renderedImages.push("");
+              continue;
+            }
+            
+            console.log(`🔵 PDF ${pdfIndex + 1} data URL length:`, pdfDataUrl.length);
+            console.log(`🔵 PDF ${pdfIndex + 1} data URL prefix:`, pdfDataUrl.substring(0, 100));
+            
+            // Extract base64 from data URL
+            let base64String = pdfDataUrl;
+            if (pdfDataUrl.includes(",")) {
+              base64String = pdfDataUrl.split(",")[1];
+              console.log(`🔵 Extracted base64 from data URL, length:`, base64String.length);
+            } else {
+              console.log(`⚠️ No comma found in data URL, treating whole string as base64`);
+            }
+            
+            if (!base64String) {
+              console.error(`❌ No base64 data found in PDF ${pdfIndex + 1}`);
+              renderedImages.push("");
+              continue;
+            }
+            
+            console.log(`🔵 PDF ${pdfIndex + 1}: Decoding base64...`);
+            let pdfData: string;
+            try {
+              pdfData = atob(base64String);
+            } catch (decodeError) {
+              console.error(`❌ Base64 decode failed for PDF ${pdfIndex + 1}:`, decodeError);
+              renderedImages.push("");
+              continue;
+            }
+            
+            const pdfArray = new Uint8Array(pdfData.length);
+            for (let i = 0; i < pdfData.length; i++) {
+              pdfArray[i] = pdfData.charCodeAt(i);
+            }
+            console.log(`🔵 PDF ${pdfIndex + 1}: Base64 decoded, byte array size:`, pdfArray.length);
+            
+            // Verify PDF header
+            const header = String.fromCharCode(pdfArray[0], pdfArray[1], pdfArray[2], pdfArray[3]);
+            console.log(`🔵 PDF ${pdfIndex + 1}: Header (first 4 bytes):`, header);
+            if (header !== "%PDF") {
+              console.warn(`⚠️ PDF ${pdfIndex + 1}: Invalid PDF header, but continuing anyway`);
+            }
+
+            console.log(`🔵 PDF ${pdfIndex + 1}: Loading PDF document...`);
+            let pdf;
+            try {
+              pdf = await pdfjsLib.getDocument({ data: pdfArray }).promise;
+            } catch (loadError) {
+              console.error(`❌ Failed to load PDF ${pdfIndex + 1}:`, loadError);
+              renderedImages.push("");
+              continue;
+            }
+            
+            const pageCount = pdf.numPages;
+            console.log(`✅ PDF ${pdfIndex + 1} loaded successfully with ${pageCount} pages`);
+            
+            // Render all pages, not just the first one
+            for (let pageNum = 1; pageNum <= pageCount; pageNum++) {
+              console.log(`🔵 PDF ${pdfIndex + 1}: Getting page ${pageNum}/${pageCount}...`);
+              let page;
+              try {
+                page = await pdf.getPage(pageNum);
+              } catch (pageError) {
+                console.error(`❌ Failed to get page ${pageNum} from PDF ${pdfIndex + 1}:`, pageError);
+                renderedImages.push("");
+                continue;
+              }
+              console.log(`✅ PDF ${pdfIndex + 1}: Page ${pageNum} retrieved`);
+              
+              console.log(`🔵 PDF ${pdfIndex + 1} Page ${pageNum}: Rendering to canvas...`);
+              const viewport = page.getViewport({ scale: 4 });
+              const canvas = document.createElement("canvas");
+              canvas.width = viewport.width;
+              canvas.height = viewport.height;
+              
+              const context = canvas.getContext("2d");
+              if (!context) {
+                console.error(`❌ Could not get 2D context for PDF ${pdfIndex + 1} Page ${pageNum}`);
+                renderedImages.push("");
+                continue;
+              }
+              
+              try {
+                await page.render({
+                  canvasContext: context,
+                  viewport: viewport,
+                  canvas: canvas,
+                } as any).promise;
+              } catch (renderError) {
+                console.error(`❌ Canvas rendering failed for PDF ${pdfIndex + 1} Page ${pageNum}:`, renderError);
+                renderedImages.push("");
+                continue;
+              }
+              
+              const imageData = canvas.toDataURL("image/png");
+              console.log(`✅ PDF ${pdfIndex + 1} Page ${pageNum}: Canvas rendered to PNG, data URL length:`, imageData.length);
+              
+              // Validate the rendered image is not empty
+              if (!imageData || imageData.length < 100) {
+                console.error(`❌ PDF ${pdfIndex + 1} Page ${pageNum}: Rendered image is too small or empty`);
+                errors.push(`PDF ${pdfIndex + 1} Page ${pageNum}: Rendered image is empty`);
+                renderedImages.push("");
+              } else {
+                renderedImages.push(imageData);
+                console.log(`✅ PDF ${pdfIndex + 1} Page ${pageNum}: Successfully added to renderedImages array`);
+              }
+            }
+          } catch (pdfError) {
+            const errorMsg = pdfError instanceof Error ? pdfError.message : String(pdfError);
+            errors.push(`PDF ${pdfIndex + 1}: ${errorMsg}`);
+            renderedImages.push("");
+          }
+        }
+        
+        console.log(`🔵 Total rendered images: ${renderedImages.length}`);
+        console.log(`🔵 Errors: ${errors.length}`);
+        setPdfImages(renderedImages);
+        setRenderErrors(errors);
+        
+        // Initialize displayOrder and imageConfigs based on total rendered pages
+        const order = renderedImages.map((_, idx) => idx);
+        setDisplayOrder(order);
+        
+        const configs = renderedImages.map((_, index) => ({
+          imageIndex: index,
+          x: 50,
+          y: 35,
+          fontSize: 24,
+          designHeight: 850,
+          renderHeight: 850,
+          renderWidth: 850,
+          fontFamily: "Noto Sans Gujarati",
+          fontColor: "#000000",
+          bold: false,
+          italic: false,
+          underline: false,
+          locked: false,
+          enabled: false,
+          sampleText: names[0] || "Sample Name",
+          order: index,
+          extraText: undefined,
+          extraX: 50,
+          extraY: 60,
+        }));
+        setImageConfigs(configs);
+        
+        setIsLoadingPdfs(false);
+        console.log(`✅ PDF rendering complete. State updated with ${renderedImages.length} images`);
+      } catch (error) {
+        console.error("❌ Error in renderPdfPages:", error);
+        const errorMsg = error instanceof Error ? error.message : String(error);
+        setRenderErrors([`Fatal error: ${errorMsg}`]);
+        setIsLoadingPdfs(false);
+      }
+    };
+
+    renderPdfPages();
+  }, [pdfs]);
 
   const firstName = names[0] || "Sample Name";
 
@@ -121,14 +291,33 @@ export function NamePlacementEditor({ images, names, onNext, onBack }: NamePlace
 
   const currentImageRealIndex = displayOrder[currentImageIndex];
   const currentConfig = imageConfigs[currentImageRealIndex];
+  
+  // Log current config whenever it changes
+  useEffect(() => {
+    console.log(`📍 Current page changed to ${currentImageIndex + 1}, config:`, currentConfig);
+  }, [currentImageIndex, currentConfig]);
 
   const updateCurrentConfig = (updates: Partial<ImageConfig>) => {
-    setImageConfigs((prev) =>
-      prev.map((config, index) =>
-        index === currentImageRealIndex ? { ...config, ...updates } : config
-      )
-    );
+    console.log(`🔄 updateCurrentConfig called for index ${currentImageRealIndex}, updates:`, updates);
+    setImageConfigs((prev) => {
+      const newConfigs = prev.map((config, index) => {
+        if (index === currentImageRealIndex) {
+          const updated = { ...config, ...updates };
+          console.log(`🔄 Updated config for index ${index} (page ${currentImageIndex + 1}):`, updated);
+          return updated;
+        }
+        return config;
+      });
+      console.log(`🔄 New imageConfigs state:`, newConfigs);
+      return newConfigs;
+    });
   };
+
+  // Log imageConfigs whenever it changes
+  useEffect(() => {
+    console.log(`📊 imageConfigs state updated:`, imageConfigs);
+    console.log(`📊 Enabled flags:`, imageConfigs.map((c, i) => ({ page: i + 1, enabled: c.enabled })));
+  }, [imageConfigs]);
 
   const handleMouseDown = (e: React.MouseEvent<HTMLDivElement>, target: 'main' | 'extra') => {
     if (!currentConfig.locked) {
@@ -198,7 +387,7 @@ export function NamePlacementEditor({ images, names, onNext, onBack }: NamePlace
   };
 
   const goToNextImage = () => {
-    if (currentImageIndex < images.length - 1) {
+    if (currentImageIndex < pdfImages.length - 1) {
       setCurrentImageIndex(currentImageIndex + 1);
     }
   };
@@ -275,48 +464,70 @@ export function NamePlacementEditor({ images, names, onNext, onBack }: NamePlace
           </Button>
         </div>
 
-        <h1 className="text-3xl mb-8">Place Names on Each Image</h1>
+        <h1 className="text-3xl mb-8">Place Names on Each PDF</h1>
 
-        {/* Image Navigation Tabs */}
-        <Card className="mb-6">
-          <CardContent className="p-4">
-            <div className="flex items-center justify-between">
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={goToPreviousImage}
-                disabled={currentImageIndex === 0}
-              >
-                <ChevronLeft className="h-4 w-4 mr-1" />
-                Previous
-              </Button>
+        {/* Loading State */}
+        {isLoadingPdfs ? (
+          <Card className="mb-6">
+            <CardContent className="p-12 text-center">
+              <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
+              <p className="text-lg text-gray-600">Loading PDF pages...</p>
+              <p className="text-sm text-gray-500 mt-2">This may take a moment for large PDFs</p>
+            </CardContent>
+          </Card>
+        ) : pdfImages.length === 0 ? (
+          <Card className="mb-6">
+            <CardContent className="p-12 text-center">
+              <p className="text-lg text-red-600 mb-2">No PDFs loaded. Please go back and upload a PDF.</p>
+              <p className="text-sm text-gray-500 mb-4">
+                Debug: pdfs.length={pdfs.length}, pdfImages.length={pdfImages.length}
+                <br />
+                pdfs array: {JSON.stringify(pdfs.map((p, i) => `PDF ${i + 1}: ${p.substring(0, 50)}...`))}
+              </p>
+              <Button onClick={onBack}>Go Back to Upload</Button>
+            </CardContent>
+          </Card>
+        ) : (
+          <>
+            {/* Image Navigation Tabs */}
+            <Card className="mb-6">
+              <CardContent className="p-4">
+                <div className="flex items-center justify-between">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={goToPreviousImage}
+                    disabled={currentImageIndex === 0}
+                  >
+                    <ChevronLeft className="h-4 w-4 mr-1" />
+                    Previous
+                  </Button>
 
-              <Tabs value={currentImageIndex.toString()} onValueChange={(v) => setCurrentImageIndex(parseInt(v))}>
-                <TabsList>
-                  {images.map((_, index) => (
-                    <TabsTrigger key={index} value={index.toString()} className="relative">
-                      Image {index + 1}
-                      {((imageConfigs[index].enabled || imageConfigs[index].extraText) && imageConfigs[index].locked) && (
-                        <span className="absolute -top-1 -right-1 w-2 h-2 bg-green-500 rounded-full" />
-                      )}
-                    </TabsTrigger>
-                  ))}
-                </TabsList>
-              </Tabs>
+                  <Tabs value={currentImageIndex.toString()} onValueChange={(v) => setCurrentImageIndex(parseInt(v))}>
+                    <TabsList>
+                      {pdfImages.map((_, index) => (
+                        <TabsTrigger key={index} value={index.toString()} className="relative">
+                          PDF {index + 1}
+                          {((imageConfigs[index].enabled || imageConfigs[index].extraText) && imageConfigs[index].locked) && (
+                            <span className="absolute -top-1 -right-1 w-2 h-2 bg-green-500 rounded-full" />
+                          )}
+                        </TabsTrigger>
+                      ))}
+                    </TabsList>
+                  </Tabs>
 
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={goToNextImage}
-                disabled={currentImageIndex === images.length - 1}
-              >
-                Next
-                <ChevronRight className="h-4 w-4 ml-1" />
-              </Button>
-            </div>
-
-          </CardContent>
-        </Card>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={goToNextImage}
+                    disabled={currentImageIndex === pdfImages.length - 1}
+                  >
+                    Next
+                    <ChevronRight className="h-4 w-4 ml-1" />
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
 
         <div className="grid lg:grid-cols-[1fr_400px] gap-6">
           {/* Left: Preview Canvas */}
@@ -324,17 +535,36 @@ export function NamePlacementEditor({ images, names, onNext, onBack }: NamePlace
             <CardContent className="p-6 w-full flex flex-col items-center">
               <div className="flex items-center justify-between mb-4 w-full">
                 <h3 className="text-lg">
-                  Image {currentImageIndex + 1} Preview
+                  PDF {currentImageIndex + 1} Preview
                 </h3>
                 <div className="flex items-center gap-2">
-                  <Label className="text-sm">Add name to this image:</Label>
+                  <Label className="text-sm">Add name to this PDF:</Label>
                   <input
                     type="checkbox"
                     checked={currentConfig.enabled}
-                    onChange={(e) => updateCurrentConfig({ enabled: e.target.checked })}
+                    onChange={(e) => {
+                      console.log(`✅ Checkbox changed for page ${currentImageIndex + 1}: ${e.target.checked}`);
+                      console.log("Current config before update:", currentConfig);
+                      updateCurrentConfig({ enabled: e.target.checked });
+                    }}
                     className="w-5 h-5"
                   />
                 </div>
+              </div>
+              
+              {/* Debug Info */}
+                {renderErrors.length > 0 && (
+                  <div className="mt-2 text-red-600 font-bold">
+                    <div>ERRORS ({renderErrors.length}):</div>
+                    {renderErrors.map((err, i) => <div key={i}>• {err}</div>)}
+                  </div>
+                )}
+              <div className="w-full bg-gray-100 p-2 rounded mb-2 text-xs">
+                <div>Current Index: {currentImageIndex}, Real Index: {currentImageRealIndex}</div>
+                <div>PDF Images Array Length: {pdfImages.length}</div>
+                <div>Current Image Exists: {pdfImages[currentImageRealIndex] ? 'YES' : 'NO'}</div>
+                <div>Current Image Length: {pdfImages[currentImageRealIndex]?.length || 0}</div>
+                <div>Loading: {isLoadingPdfs ? 'YES' : 'NO'}</div>
               </div>
 
               <div
@@ -370,13 +600,26 @@ export function NamePlacementEditor({ images, names, onNext, onBack }: NamePlace
                     transition: "transform 0.15s ease-out",
                   }}
                 >
-                  <img
-                    src={images[currentImageRealIndex]}
-                    alt={`Image ${currentImageIndex + 1}`}
+                <img
+                    src={pdfImages[currentImageRealIndex]}
+                    alt={`PDF ${currentImageIndex + 1}`}
                     className="w-full h-full object-contain"
                     ref={imgRef}
-                    onLoad={computeRenderMetrics}
+                    onLoad={() => {
+                      console.log(`✅ Image loaded for PDF ${currentImageIndex + 1}`);
+                      computeRenderMetrics();
+                    }}
+                    onError={(e) => {
+                      console.error(`❌ Image load error for PDF ${currentImageIndex + 1}:`, e);
+                      console.log("Image src preview:", (e.currentTarget as HTMLImageElement).src?.substring(0, 100));
+                    }}
+                    style={{ display: pdfImages[currentImageRealIndex] ? 'block' : 'none' }}
                   />
+                  {!pdfImages[currentImageRealIndex] && (
+                    <div className="w-full h-full flex items-center justify-center text-gray-500">
+                      <p>⚠️ PDF image not loaded</p>
+                    </div>
+                  )}
                   {renderMetrics && (
                     <>
                       {currentConfig.enabled && (
@@ -621,7 +864,15 @@ export function NamePlacementEditor({ images, names, onNext, onBack }: NamePlace
                 size="lg"
                 className="w-full"
                 onClick={() => {
-                  const orderedConfigs = displayOrder.map((idx, order) => ({ ...imageConfigs[idx], order }));
+                  console.log("🔴 BEFORE sending - Full imageConfigs state:", imageConfigs);
+                  console.log("🔴 BEFORE sending - Individual enabled flags:", imageConfigs.map((c, i) => ({ page: i + 1, enabled: c.enabled })));
+                  
+                  const orderedConfigs = displayOrder.map((idx, arrayIndex) => ({ 
+                    ...imageConfigs[idx], 
+                    order: arrayIndex 
+                  }));
+                  console.log("📤 Sending imageConfigs to next page:", orderedConfigs);
+                  console.log("Enabled pages:", orderedConfigs.map((c, i) => `Page ${i + 1}: enabled=${c.enabled}`));
                   onNext(orderedConfigs);
                 }}
               >
@@ -630,6 +881,8 @@ export function NamePlacementEditor({ images, names, onNext, onBack }: NamePlace
             </div>
           </div>
         </div>
+          </>
+        )}
       </div>
     </div>
   );

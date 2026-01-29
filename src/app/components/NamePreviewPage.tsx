@@ -3,18 +3,25 @@ import { Button } from "@/app/components/ui/button";
 import { Card, CardContent } from "@/app/components/ui/card";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { ImageConfig } from "./NamePlacementEditor";
+import { PDFDocument } from "pdf-lib";
+import * as pdfjsLib from "pdfjs-dist";
+
+// Set up PDF.js worker - use local file
+pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs';
 
 interface NamePreviewPageProps {
   names: string[];
-  images: string[];
+  pdfs: string[];
   imageConfigs: ImageConfig[];
   onNext: () => void;
   onBack: () => void;
 }
 
-export function NamePreviewPage({ names, images, imageConfigs, onNext, onBack }: NamePreviewPageProps) {
+export function NamePreviewPage({ names, pdfs, imageConfigs, onNext, onBack }: NamePreviewPageProps) {
   const [currentIndex, setCurrentIndex] = useState(0);
   const [previewImages, setPreviewImages] = useState<string[]>([]);
+  const [pdfImages, setPdfImages] = useState<string[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
   const containerRef = useRef<HTMLDivElement>(null);
   const imgRef = useRef<HTMLImageElement>(null);
   const [renderMetrics, setRenderMetrics] = useState<{ rw: number; rh: number; offsetX: number; offsetY: number } | null>(null);
@@ -22,9 +29,61 @@ export function NamePreviewPage({ names, images, imageConfigs, onNext, onBack }:
   const allConfigs = imageConfigs;
   const currentName = names[0];
 
+  // First render PDFs to images
   useEffect(() => {
-    generatePreviews();
-  }, []);
+    const renderPdfs = async () => {
+      setIsLoading(true);
+      const renderedImages: string[] = [];
+      
+      for (const pdfDataUrl of pdfs) {
+        try {
+          const base64String = pdfDataUrl.includes(",") ? pdfDataUrl.split(",")[1] : pdfDataUrl;
+          const pdfData = atob(base64String);
+          const pdfArray = new Uint8Array(pdfData.length);
+          for (let i = 0; i < pdfData.length; i++) {
+            pdfArray[i] = pdfData.charCodeAt(i);
+          }
+
+          const pdf = await pdfjsLib.getDocument({ data: pdfArray }).promise;
+          const pageCount = pdf.numPages;
+          
+          // Render all pages
+          for (let pageNum = 1; pageNum <= pageCount; pageNum++) {
+            const page = await pdf.getPage(pageNum);
+            const viewport = page.getViewport({ scale: 4 });
+            const canvas = document.createElement("canvas");
+            canvas.width = viewport.width;
+            canvas.height = viewport.height;
+            
+            const context = canvas.getContext("2d");
+            if (context) {
+              await page.render({
+                canvasContext: context,
+                viewport: viewport,
+                canvas: canvas,
+              } as any).promise;
+              
+              renderedImages.push(canvas.toDataURL("image/png"));
+            }
+          }
+        } catch (error) {
+          console.error("Error rendering PDF:", error);
+          renderedImages.push("");
+        }
+      }
+      
+      setPdfImages(renderedImages);
+      setIsLoading(false);
+    };
+    
+    renderPdfs();
+  }, [pdfs]);
+
+  useEffect(() => {
+    if (pdfImages.length > 0 && !isLoading) {
+      generatePreviews();
+    }
+  }, [pdfImages, isLoading]);
 
   const computeRenderMetrics = () => {
     const container = containerRef.current;
@@ -64,7 +123,7 @@ export function NamePreviewPage({ names, images, imageConfigs, onNext, onBack }:
       
       await new Promise((resolve) => {
         img.onload = resolve;
-        img.src = images[config.imageIndex];
+        img.src = pdfImages[config.imageIndex];
       });
 
       // Render preview at fixed visual height to match editor
@@ -200,7 +259,19 @@ export function NamePreviewPage({ names, images, imageConfigs, onNext, onBack }:
 
             {(() => {
               const cfg = allConfigs[currentIndex];
-              const imgSrc = images[cfg.imageIndex];
+              const imgSrc = pdfImages[cfg.imageIndex];
+              
+              if (isLoading) {
+                return (
+                  <div className="flex items-center justify-center h-96">
+                    <div className="text-center">
+                      <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
+                      <p>Loading preview...</p>
+                    </div>
+                  </div>
+                );
+              }
+              
               return (
                 <div className="bg-white border-2 rounded-lg p-4 flex justify-center">
                   <div

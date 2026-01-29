@@ -3,24 +3,67 @@ import { Button } from "@/app/components/ui/button";
 import { Card, CardContent } from "@/app/components/ui/card";
 import { Progress } from "@/app/components/ui/progress";
 import { CheckCircle, Download, Loader2 } from "lucide-react";
-import jsPDF from "jspdf";
+import { PDFDocument, rgb } from "pdf-lib";
 import JSZip from "jszip";
 import { ImageConfig } from "./NamePlacementEditor";
 
+// Helper function to render text to image using canvas
+const renderTextToImage = async (
+  text: string,
+  fontSize: number,
+  fontFamily: string,
+  fontColor: string,
+  bold: boolean,
+  italic: boolean,
+  underline: boolean
+): Promise<string> => {
+  const canvas = document.createElement("canvas");
+  const ctx = canvas.getContext("2d")!;
+  
+  // Set font style
+  const fontWeight = bold ? "bold" : "normal";
+  const fontStyle = italic ? "italic" : "normal";
+  ctx.font = `${fontStyle} ${fontWeight} ${fontSize}px "${fontFamily}"`;
+  
+  // Measure text
+  const metrics = ctx.measureText(text);
+  const textWidth = metrics.width;
+  const textHeight = fontSize * 1.5; // Add padding
+  
+  // Set canvas size
+  canvas.width = textWidth + 20; // Add padding
+  canvas.height = textHeight + 20;
+  
+  // Clear and set background to transparent
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  
+  // Re-apply font after canvas resize
+  ctx.font = `${fontStyle} ${fontWeight} ${fontSize}px "${fontFamily}"`;
+  ctx.fillStyle = fontColor;
+  ctx.textBaseline = "middle";
+  
+  // Draw text
+  ctx.fillText(text, 10, canvas.height / 2);
+  
+  // Draw underline if needed
+  if (underline) {
+    ctx.strokeStyle = fontColor;
+    ctx.lineWidth = Math.max(1, fontSize / 12);
+    ctx.beginPath();
+    ctx.moveTo(10, canvas.height / 2 + fontSize / 2);
+    ctx.lineTo(10 + textWidth, canvas.height / 2 + fontSize / 2);
+    ctx.stroke();
+  }
+  
+  return canvas.toDataURL("image/png");
+};
+
 interface ProcessingPageProps {
   names: string[];
-  images: string[];
+  pdfs: string[]; // Changed from images to pdfs (base64 strings)
   imageConfigs: ImageConfig[];
   onComplete?: () => void;
 }
-
-const loadImage = (src: string) =>
-  new Promise<HTMLImageElement>((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => resolve(img);
-    img.onerror = reject;
-    img.src = src;
-  });
 
 const ensureFontsLoaded = async (configs: ImageConfig[]) => {
   if (!("fonts" in document)) return;
@@ -37,7 +80,16 @@ const ensureFontsLoaded = async (configs: ImageConfig[]) => {
   await (document.fonts as FontFaceSet).ready;
 };
 
-export function ProcessingPage({ names, images, imageConfigs, onComplete }: ProcessingPageProps) {
+// Helper function to parse color to RGB values for pdf-lib
+const parseColorToRgb = (colorStr: string): { red: number; green: number; blue: number } => {
+  const hex = colorStr.replace("#", "");
+  const r = parseInt(hex.substring(0, 2), 16) / 255;
+  const g = parseInt(hex.substring(2, 4), 16) / 255;
+  const b = parseInt(hex.substring(4, 6), 16) / 255;
+  return { red: r, green: g, blue: b };
+};
+
+export function ProcessingPage({ names, pdfs, imageConfigs, onComplete }: ProcessingPageProps) {
   const [progress, setProgress] = useState(0);
   const [isComplete, setIsComplete] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -46,6 +98,9 @@ export function ProcessingPage({ names, images, imageConfigs, onComplete }: Proc
   const progressRef = useRef(0); // Track progress to ensure it only increases
 
   const namesCount = names.length;
+  
+  console.log("📥 ProcessingPage received imageConfigs:", imageConfigs);
+  console.log("Enabled pages in received configs:", imageConfigs.map((c, i) => `Page ${i + 1}: enabled=${c.enabled}, x=${c.x}, y=${c.y}`));
 
   useEffect(() => {
     generatePDFs();
@@ -59,158 +114,141 @@ export function ProcessingPage({ names, images, imageConfigs, onComplete }: Proc
       setProgress(0);
       progressRef.current = 0;
 
-      // Ensure webfonts are available before rasterizing SVG to image
+      // Ensure webfonts are available before rendering text to images
       await ensureFontsLoaded(imageConfigs);
 
       const zip = new JSZip();
       const totalCards = names.length;
-      const orderedConfigs = [...imageConfigs].sort((a, b) => {
-        const aOrder = a.order ?? a.imageIndex ?? 0;
-        const bOrder = b.order ?? b.imageIndex ?? 0;
-        return aOrder - bOrder;
-      });
-
-      // Process in batches to avoid memory exhaustion for large datasets
+      
+      // Get the first PDF as template (all PDFs should have same structure)
+      const templatePdfUrl = pdfs[0];
+      const templatePdfBytes = await fetch(templatePdfUrl).then(res => res.arrayBuffer());
+      const templatePdf = await PDFDocument.load(templatePdfBytes);
+      
+      // Process in batches to avoid memory exhaustion
       const batchSize = totalCards > 2000 ? 5 : totalCards > 500 ? 15 : totalCards > 100 ? 50 : 100;
-      const pagesPerName = orderedConfigs.length;
-      const totalItems = totalCards * pagesPerName;
+      const totalPages = templatePdf.getPageCount();
+      const totalItems = totalCards;
 
       for (let i = 0; i < totalCards; i++) {
         const name = names[i];
-        const pdf = new jsPDF({ orientation: "portrait", unit: "pt", format: "a4" });
-
-        for (let pageIndex = 0; pageIndex < orderedConfigs.length; pageIndex++) {
-          const config = orderedConfigs[pageIndex];
-          const imageUrl = images[config.imageIndex];
-
-          const img = await loadImage(imageUrl);
-
-          if (pageIndex > 0) {
-            pdf.addPage("a4", "portrait");
+        
+        console.log(`🔵 Generating PDF for name: ${name} (${i + 1}/${totalCards})`);
+        
+        // Load and copy the template PDF for each name
+        const pdfBytes = await fetch(templatePdfUrl).then(res => res.arrayBuffer());
+        const pdf = await PDFDocument.load(pdfBytes);
+        
+        const pageCount = pdf.getPageCount();
+        console.log(`📄 PDF has ${pageCount} pages`);
+        console.log(`⚙️ imageConfigs has ${imageConfigs.length} configs`);
+        
+        // Add name to each configured page
+        for (let pageIndex = 0; pageIndex < pageCount; pageIndex++) {
+          const config = imageConfigs[pageIndex];
+          
+          console.log(`🔍 Page ${pageIndex + 1}: config exists=${!!config}, enabled=${config?.enabled}, extraText=${!!config?.extraText}`);
+          
+          if (!config) {
+            console.log(`⚠️ No config for page ${pageIndex + 1}, skipping`);
+            continue;
           }
-
-          // PDF page dimensions
-          const pageWidth = pdf.internal.pageSize.getWidth();
-          const pageHeight = pdf.internal.pageSize.getHeight();
           
-          // MAXIMUM RESOLUTION SETTINGS (8x = ~6K-8K resolution)
-          // Optimized for maximum quality without memory errors
-          const scale = 8;
-
-          const canvasWidth = pageWidth * scale;
-          const canvasHeight = pageHeight * scale;
+          const page = pdf.getPage(pageIndex);
+          const { width, height } = page.getSize();
           
-          // Create maximum resolution canvas
-          const canvas = document.createElement("canvas");
-          canvas.width = canvasWidth;
-          canvas.height = canvasHeight;
-          const ctx = canvas.getContext("2d", { 
-            alpha: false,
-            willReadFrequently: false,
-            desynchronized: false
-          });
-          if (!ctx) throw new Error("Canvas context not available");
-
-          // Disable smoothing for pixel-perfect image rendering
-          ctx.imageSmoothingEnabled = false;
-
-          // Calculate image position - use actual image dimensions
-          const imgRatio = img.width / img.height;
-          const pageRatio = pageWidth / pageHeight;
-          let renderWidth = canvasWidth;
-          let renderHeight = canvasHeight;
-          if (imgRatio > pageRatio) {
-            renderHeight = canvasWidth / imgRatio;
+          console.log(`📐 Page ${pageIndex + 1} PDF size: ${width}x${height}`);
+          
+          // Add main text if enabled
+          if (config.enabled) {
+            const textX = (config.x / 100) * width;
+            const textY = height - (config.y / 100) * height; // Flip Y since PDF coords are bottom-up
+            
+            console.log(`✍️ Page ${pageIndex + 1}: Adding text "${name}" at (${textX.toFixed(2)}, ${textY.toFixed(2)}), size=${config.fontSize}, color=${config.fontColor}`);
+            
+            try {
+              // Render text to image
+              const textImageDataUrl = await renderTextToImage(
+                name || config.sampleText || "",
+                config.fontSize || 24,
+                config.fontFamily || "Noto Sans Gujarati",
+                config.fontColor || "#000000",
+                config.bold || false,
+                config.italic || false,
+                config.underline || false
+              );
+              
+              // Embed image in PDF
+              const textImage = await pdf.embedPng(textImageDataUrl);
+              const textDims = textImage.scale(1);
+              
+              page.drawImage(textImage, {
+                x: textX,
+                y: textY - textDims.height / 2, // Center vertically
+                width: textDims.width,
+                height: textDims.height,
+              });
+              
+              console.log(`✅ Text image drawn successfully on page ${pageIndex + 1}`);
+            } catch (textError) {
+              console.error(`❌ Error drawing text on page ${pageIndex + 1}:`, textError);
+            }
           } else {
-            renderWidth = canvasHeight * imgRatio;
+            console.log(`ℹ️ Text not enabled for page ${pageIndex + 1}`);
           }
-          const xOffset = (canvasWidth - renderWidth) / 2;
-          const yOffset = (canvasHeight - renderHeight) / 2;
-
-          // Draw image at maximum resolution (pixel-perfect, no interpolation)
-          ctx.drawImage(img, xOffset, yOffset, renderWidth, renderHeight);
-
-          // Draw text at MAXIMUM RESOLUTION (8x scaling = ultra-sharp text)
-          if (config.enabled || config.extraText) {
-            // Enable smoothing for text only (for anti-aliasing)
-            ctx.imageSmoothingEnabled = true;
-            ctx.imageSmoothingQuality = "high";
+          
+          // Add extra text if present
+          if (config.extraText) {
+            const extraX = ((config.extraX ?? 50) / 100) * width;
+            const extraY = height - ((config.extraY ?? 60) / 100) * height;
             
-            // Maximum quality text rendering settings
-            ctx.textAlign = "left";
-            ctx.textBaseline = "middle";
-            ctx.direction = "ltr";
-            ctx.fillStyle = config.fontColor;
+            console.log(`✍️ Page ${pageIndex + 1}: Adding extra text "${config.extraText}" at (${extraX.toFixed(2)}, ${extraY.toFixed(2)})`);
             
-            // Enable all advanced text rendering features for maximum clarity
-            if ('fontKerning' in ctx) {
-              (ctx as any).fontKerning = "normal";
+            try {
+              // Render text to image
+              const extraTextImageDataUrl = await renderTextToImage(
+                config.extraText,
+                config.fontSize || 24,
+                config.fontFamily || "Noto Sans Gujarati",
+                config.fontColor || "#000000",
+                config.bold || false,
+                config.italic || false,
+                config.underline || false
+              );
+              
+              // Embed image in PDF
+              const extraTextImage = await pdf.embedPng(extraTextImageDataUrl);
+              const extraTextDims = extraTextImage.scale(1);
+              
+              page.drawImage(extraTextImage, {
+                x: extraX,
+                y: extraY - extraTextDims.height / 2,
+                width: extraTextDims.width,
+                height: extraTextDims.height,
+              });
+              
+              console.log(`✅ Extra text image drawn successfully on page ${pageIndex + 1}`);
+            } catch (textError) {
+              console.error(`❌ Error drawing extra text on page ${pageIndex + 1}:`, textError);
             }
-            if ('textRendering' in ctx) {
-              (ctx as any).textRendering = "optimizeLegibility";
-            }
-            if ('fontVariantCaps' in ctx) {
-              (ctx as any).fontVariantCaps = "normal";
-            }
-            
-            let fontStyle = "";
-            if (config.italic) fontStyle += "italic ";
-            if (config.bold) fontStyle += "bold ";
-            // 8x font scaling for MAXIMUM text clarity (6K-8K resolution)
-            ctx.font = `${fontStyle}${config.fontSize * scale}px "${config.fontFamily}"`;
-
-            // Main text - rendered at maximum quality
-            if (config.enabled) {
-              const textX = xOffset + (config.x / 100) * renderWidth;
-              const textY = yOffset + (config.y / 100) * renderHeight;
-              ctx.fillText(name || config.sampleText || "", textX, textY);
-            }
-
-            // Extra text - rendered at maximum quality
-            if (config.extraText) {
-              const extraX = xOffset + ((config.extraX ?? 50) / 100) * renderWidth;
-              const extraY = yOffset + ((config.extraY ?? 60) / 100) * renderHeight;
-              ctx.fillText(config.extraText, extraX, extraY);
-            }
-            
-            // Disable smoothing again after text
-            ctx.imageSmoothingEnabled = false;
-          }
-
-          // Convert to JPEG at 99% quality (near-lossless, smaller file size than PNG)
-          const canvasImage = canvas.toDataURL("image/jpeg", 0.99);
-          pdf.addImage(canvasImage, "JPEG", 0, 0, pageWidth, pageHeight, undefined, "FAST");
-
-          // Explicitly clean up canvas to free memory
-          ctx.clearRect(0, 0, canvasWidth, canvasHeight);
-          canvas.width = 0;
-          canvas.height = 0;
-
-          // Update progress based on total items processed
-          // Only increase, never decrease
-          const itemsProcessed = i * pagesPerName + pageIndex + 1;
-          const currentProgress = Math.floor((itemsProcessed / totalItems) * 100);
-          if (currentProgress > progressRef.current) {
-            progressRef.current = currentProgress;
-            setProgress(currentProgress);
           }
         }
+        
+        // Save PDF
+        console.log(`💾 Saving PDF for ${name}`);
+        const pdfData = await pdf.save();
+        zip.file(`${name}.pdf`, pdfData);
 
-        const pdfBlob = pdf.output("blob");
-        zip.file(`${name}.pdf`, pdfBlob);
+        // Update progress
+        const currentProgress = Math.floor(((i + 1) / totalItems) * 100);
+        if (currentProgress > progressRef.current) {
+          progressRef.current = currentProgress;
+          setProgress(currentProgress);
+        }
 
-        // Allow browser to process events and clear memory periodically
-        // Smaller batches for larger datasets
+        // Allow browser to process events periodically
         if ((i + 1) % batchSize === 0) {
           await new Promise((resolve) => setTimeout(resolve, 50));
-          
-          // Force garbage collection hint for very large batches (3000 names)
-          if (totalCards > 1000) {
-            // Clear array references to help GC
-            if (typeof gc !== "undefined") {
-              gc();
-            }
-          }
         }
       }
 
