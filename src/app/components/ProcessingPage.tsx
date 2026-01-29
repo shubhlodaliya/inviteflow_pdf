@@ -17,41 +17,49 @@ const renderTextToImage = async (
   italic: boolean,
   underline: boolean
 ): Promise<string> => {
+  // Use 4x scale for high quality rendering
+  const scale = 4;
+  const scaledFontSize = fontSize * scale;
+  
   const canvas = document.createElement("canvas");
   const ctx = canvas.getContext("2d")!;
   
   // Set font style
   const fontWeight = bold ? "bold" : "normal";
   const fontStyle = italic ? "italic" : "normal";
-  ctx.font = `${fontStyle} ${fontWeight} ${fontSize}px "${fontFamily}"`;
+  ctx.font = `${fontStyle} ${fontWeight} ${scaledFontSize}px "${fontFamily}"`;
   
   // Measure text
   const metrics = ctx.measureText(text);
   const textWidth = metrics.width;
-  const textHeight = fontSize * 1.5; // Add padding
+  const textHeight = scaledFontSize * 1.5; // Add padding
   
-  // Set canvas size
-  canvas.width = textWidth + 20; // Add padding
-  canvas.height = textHeight + 20;
+  // Set canvas size with high resolution
+  canvas.width = textWidth + (20 * scale); // Add padding
+  canvas.height = textHeight + (20 * scale);
   
   // Clear and set background to transparent
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   
   // Re-apply font after canvas resize
-  ctx.font = `${fontStyle} ${fontWeight} ${fontSize}px "${fontFamily}"`;
+  ctx.font = `${fontStyle} ${fontWeight} ${scaledFontSize}px "${fontFamily}"`;
   ctx.fillStyle = fontColor;
   ctx.textBaseline = "middle";
   
+  // Enable anti-aliasing for smoother text
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+  
   // Draw text
-  ctx.fillText(text, 10, canvas.height / 2);
+  ctx.fillText(text, 10 * scale, canvas.height / 2);
   
   // Draw underline if needed
   if (underline) {
     ctx.strokeStyle = fontColor;
-    ctx.lineWidth = Math.max(1, fontSize / 12);
+    ctx.lineWidth = Math.max(1, scaledFontSize / 12);
     ctx.beginPath();
-    ctx.moveTo(10, canvas.height / 2 + fontSize / 2);
-    ctx.lineTo(10 + textWidth, canvas.height / 2 + fontSize / 2);
+    ctx.moveTo(10 * scale, canvas.height / 2 + scaledFontSize / 2);
+    ctx.lineTo(10 * scale + textWidth, canvas.height / 2 + scaledFontSize / 2);
     ctx.stroke();
   }
   
@@ -180,7 +188,8 @@ export function ProcessingPage({ names, pdfs, imageConfigs, onComplete }: Proces
               
               // Embed image in PDF
               const textImage = await pdf.embedPng(textImageDataUrl);
-              const textDims = textImage.scale(1);
+              // Scale down by 0.25 (1/4) to get back to original size since we rendered at 4x
+              const textDims = textImage.scale(0.25);
               
               page.drawImage(textImage, {
                 x: textX,
@@ -218,7 +227,8 @@ export function ProcessingPage({ names, pdfs, imageConfigs, onComplete }: Proces
               
               // Embed image in PDF
               const extraTextImage = await pdf.embedPng(extraTextImageDataUrl);
-              const extraTextDims = extraTextImage.scale(1);
+              // Scale down by 0.25 (1/4) to get back to original size since we rendered at 4x
+              const extraTextDims = extraTextImage.scale(0.25);
               
               page.drawImage(extraTextImage, {
                 x: extraX,
